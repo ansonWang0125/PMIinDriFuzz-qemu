@@ -75,4 +75,5 @@ int ram_dirty_bitmap_reload(MigrationState *s, RAMBlock *rb);
 int colo_init_ram_cache(void);
 void colo_release_ram_cache(void);
 
+void *host_from_ram_block_offset(RAMBlock *block, ram_addr_t offset);
 #endif

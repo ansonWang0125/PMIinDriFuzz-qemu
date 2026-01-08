@@ -1,5 +1,8 @@
 # See docs/devel/tracing.txt for syntax documentation.
 
+# periscope.c
+periscope_next_input(int total) "%d"
+
 # savevm.c
 qemu_loadvm_state_section(unsigned int section_type) "%d"
 qemu_loadvm_state_section_command(int ret) "%d"

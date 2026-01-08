@@ -55,8 +55,12 @@
 #include "block.h"
 #include "sysemu/sysemu.h"
 #include "qemu/uuid.h"
+#include "qemu/mmap-alloc.h"
 #include "savevm.h"
 #include "qemu/iov.h"
+#include "migration/periscope_perf_switches.h"
+#include "migration/periscope.h"
+#include "migration/periscope-delta-snap.h"
 
 /***********************************************************/
 /* ram save/restore */
@@ -2521,8 +2525,31 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss,
     }
 
     do {
+        bool should_save_target_page = true;
+#if 0
+        should_save_target_page &=
+            !quick_snapshot || strcmp(pss->block->idstr, "pc.ram") != 0;
+        should_save_target_page &= !periscope_save_ram_only || strcmp(pss->block->idstr, "pc.ram") == 0;
+#endif
+        if (strcmp(pss->block->idstr, "pc.ram") == 0 && periscope_delta_snapshot && pss->block->bmap_delta_snap) {
+            bool ret = test_and_clear_bit(pss->page, pss->block->bmap_delta_snap);
+            if (ret) {
+                // disregard migration bitmap management, force setting the bitmap.
+                // this allows us to get past default migration bitmap check below.
+                set_bit(pss->page, pss->block->bmap);
+            }
+            else {
+                should_save_target_page = false;
+            }
+        }
+
         /* Check the pages is dirty and if it is send it */
         if (!migration_bitmap_clear_dirty(rs, pss->block, pss->page)) {
+            pss->page++;
+            continue;
+        }
+
+        if (!should_save_target_page) {
             pss->page++;
             continue;
         }
@@ -2688,6 +2715,14 @@ static void ram_save_cleanup(void *opaque)
     RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         g_free(block->bmap);
         block->bmap = NULL;
+        if (block->bmap_delta_restore) {
+            g_free(block->bmap_delta_restore);
+            block->bmap_delta_restore = NULL;
+        }
+        if (block->bmap_delta_snap) {
+            g_free(block->bmap_delta_snap);
+            block->bmap_delta_snap = NULL;
+        }
         g_free(block->unsentmap);
         block->unsentmap = NULL;
     }
@@ -3389,6 +3424,101 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     return 0;
 }
 
+void compare_ram(unsigned long long *p1, unsigned long long *p2, int len);
+void compare_ram(unsigned long long *p1, unsigned long long *p2, int len)
+{
+   for(int i=0x100fa0/sizeof(unsigned long long); i<len/sizeof(unsigned long long); ++i) {
+      if(p1[i] != p2[i]) {
+         printf("------------------> %lx: %llx != %llx\n", i*sizeof(unsigned long long), p1[i], p2[i]);
+         break;
+      }
+   }
+}
+
+void cram(void);
+void cram(void)
+{
+    RAMBlock *block;
+    printf("------------- %s ------------------\n", __FUNCTION__);
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+       if(strcmp(block->idstr, "pc.ram") != 0) continue;
+       compare_ram((unsigned long long*)block->host, (unsigned long long*)block->host_restore, block->used_length);
+    }
+}
+
+int kvm_update_user_memory_region(void* old, void* new, size_t len);
+// this is only called on the quick reset path
+// meaning that we can just discard any changes since the last snapshot
+// the reset is done by mmaping the host ram ptr again with MAP_PRIVATE
+int ram_reset_mappings_cow(void)
+{
+    RAMBlock *block;
+    void *old;
+
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+       if(strcmp(block->idstr, "pc.ram") != 0) continue; // TODO, also apply to acpi and bios ram blocks?
+       if(!block->host_restore) {
+          printf("can not restore %s\n", block->idstr);
+          return -1;
+       }
+       old = block->host;
+       //munmap(old, block->max_length); // TODO: needed?
+       uint8_t *area = mmap(block->host, block->max_length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, block->fd, 0);
+       if (area == MAP_FAILED) {
+          printf("ERROR MAP FAILED %s\n", block->idstr);
+          perror("mmap");
+          return -1;
+       }
+       block->host = area;
+       kvm_update_user_memory_region(old, block->host, block->max_length);
+    }
+    return 0;
+}
+
+// ram duplicate mappings recreates a shared mapping to the filed backed ram
+// so that when we are doing a full snapshot restore (not quick reset)
+// the changes actually reach the file backend
+int ram_duplicate_mappings(void)
+{
+    RAMBlock *block;
+
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+       if(strcmp(block->idstr, "pc.ram") != 0) continue;
+
+       uint8_t *area = mmap(block->host, block->max_length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, block->fd, 0);
+       if (area == MAP_FAILED) {
+          printf("ERROR MAP FAILED %s\n", block->idstr);
+          perror("mmap");
+          return -1;
+       }
+       block->host_restore = block->host;
+       block->host = area;
+    }
+
+    return 0;
+}
+
+// after the full snapshot restore is done restoring data in the file backend
+// we can now cow protect the file backed memory area
+// so any changes from now on can be easily reset by mmaping the area again (see ram_reset_mappings)
+int ram_duplicate_mappings_cow(void)
+{
+    RAMBlock *block;
+    RAMBLOCK_FOREACH_MIGRATABLE(block) {
+       if(strcmp(block->idstr, "pc.ram") != 0) continue;
+       // make sure all the changes are synced?
+       fsync(block->fd);
+       uint8_t *area = mmap(block->host, block->max_length, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE, block->fd, 0);
+       if (area == MAP_FAILED) {
+          printf("ERROR MAP FAILED %s\n", block->idstr);
+          perror("mmap");
+          return -1;
+       }
+       kvm_update_user_memory_region(block->host_restore, block->host, block->max_length);
+    }
+    return 0;
+}
+
 /**
  * ram_save_iterate: iterative stage for migration
  *
@@ -3641,7 +3771,7 @@ static inline RAMBlock *ram_block_from_stream(QEMUFile *f, int flags)
     return block;
 }
 
-static inline void *host_from_ram_block_offset(RAMBlock *block,
+void *host_from_ram_block_offset(RAMBlock *block,
                                                ram_addr_t offset)
 {
     if (!offset_in_ramblock(block, offset)) {
@@ -4222,6 +4352,41 @@ static void colo_flush_ram_cache(void)
     trace_colo_flush_ram_cache_end();
 }
 
+#define SELECT_RESTORE 1
+//#define DBG_SELECT_RESTORE 1
+#define DBG_SELECT_RESTORE 0
+//#define DBG_SELECT_RESTORE_NAME "0000:00:05.0/mb2"
+//#undef DBG_SELECT_RESTORE_NAME
+#define COUNT_SR_SKIPS 0
+
+#if COUNT_SR_SKIPS == 1
+static void init_ramblock_skipped(void)
+{
+    RAMBlock *rb;
+    RAMBLOCK_FOREACH_MIGRATABLE(rb) {
+       rb->skipped = 0;
+       rb->restored = 0;
+    }
+}
+static void print_ramblock_skipped(void)
+{
+    RAMBlock *rb;
+    RAMBLOCK_FOREACH_MIGRATABLE(rb) {
+        //if (strcmp(rb->idstr, "pc.ram") == 0)
+        if (rb->restored)
+            printf("periscope: %s SKIP: %ld, RES: %ld\n", rb->idstr, rb->skipped, rb->restored);
+    }
+}
+static void inc_ramblock_restored(RAMBlock *rb)
+{
+   rb->restored++;
+}
+static void inc_ramblock_skipped(RAMBlock *rb)
+{
+   rb->skipped++;
+}
+#endif
+
 static int ram_load(QEMUFile *f, void *opaque, int version_id)
 {
     int flags = 0, ret = 0, invalid_flags = 0;
@@ -4255,10 +4420,20 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
         ret = ram_load_postcopy(f);
     }
 
+#if COUNT_SR_SKIPS == 1
+    init_ramblock_skipped();
+#endif
     while (!postcopy_running && !ret && !(flags & RAM_SAVE_FLAG_EOS)) {
         ram_addr_t addr, total_ram_bytes;
         void *host = NULL;
         uint8_t ch;
+        unsigned long *bm = NULL;
+#ifdef DBG_SELECT_RESTORE_NAME
+        char* name = NULL;
+#endif
+#if COUNT_SR_SKIPS == 1
+        RAMBlock *rb_tmp = NULL;
+#endif
 
         addr = qemu_get_be64(f);
         flags = addr & ~TARGET_PAGE_MASK;
@@ -4276,7 +4451,9 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
         if (flags & (RAM_SAVE_FLAG_ZERO | RAM_SAVE_FLAG_PAGE |
                      RAM_SAVE_FLAG_COMPRESS_PAGE | RAM_SAVE_FLAG_XBZRLE)) {
             RAMBlock *block = ram_block_from_stream(f, flags);
-
+#if COUNT_SR_SKIPS == 1
+            rb_tmp = block;
+#endif
             /*
              * After going into COLO, we should load the Page into colo_cache.
              */
@@ -4291,6 +4468,20 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                 break;
             }
 
+#if SELECT_RESTORE == 1
+            bm = block->bmap_delta_restore;
+#ifdef DBG_SELECT_RESTORE_NAME
+            name = block->idstr;
+#endif
+#endif
+            //if(block->bmap_delta_restore) {
+            //   //if(test_bit(ramblock_recv_bitmap_offset(host, block), block->bmap_delta_restore)) {
+            //   if(test_bit(addr >> TARGET_PAGE_BITS, block->bmap_delta_restore)) {
+            //      printf("addr %lx, offset %lx, shift %lx\n", addr,
+            //            ramblock_recv_bitmap_offset(host, block), addr >> TARGET_PAGE_BITS);
+            //      skip = true;
+            //   }
+            //}
             if (!migration_incoming_in_colo_state()) {
                 ramblock_recv_bitmap_set(block, host);
             }
@@ -4369,24 +4560,85 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
 
         case RAM_SAVE_FLAG_ZERO:
             ch = qemu_get_byte(f);
-            ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
+            if (!bm || (bm && test_bit(addr >> TARGET_PAGE_BITS, bm))) {
+                ram_handle_compressed(host, ch, TARGET_PAGE_SIZE);
+#if COUNT_SR_SKIPS == 1
+                if (rb_tmp) {
+                    inc_ramblock_restored(rb_tmp);
+                }
+#endif
+            } else {
+#if COUNT_SR_SKIPS == 1
+                if (rb_tmp) {
+                    inc_ramblock_skipped(rb_tmp);
+                }
+#endif
+            }
+#if DBG_SELECT_RESTORE == 1
+#ifdef DBG_SELECT_RESTORE_NAME
+            if(name && strcmp(name, DBG_SELECT_RESTORE_NAME) == 0)
+#endif
+                printf("ram_save_flag_zero addr %lx, shift %lx\n", addr, addr >> TARGET_PAGE_BITS);
+#endif
             break;
 
         case RAM_SAVE_FLAG_PAGE:
-            qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+            if (!bm || (bm && test_bit(addr >> TARGET_PAGE_BITS, bm))) {
+                qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+#if COUNT_SR_SKIPS == 1
+                if (rb_tmp) {
+                    inc_ramblock_restored(rb_tmp);
+                }
+#endif
+            } else {
+                skip_qemu_get_buffer(f, host, TARGET_PAGE_SIZE);
+#if COUNT_SR_SKIPS == 1
+                if (rb_tmp) {
+                    inc_ramblock_skipped(rb_tmp);
+                }
+#endif
+            }
+#if DBG_SELECT_RESTORE == 1
+#ifdef DBG_SELECT_RESTORE_NAME
+            if(name && strcmp(name, DBG_SELECT_RESTORE_NAME) == 0)
+#endif
+                printf("ram_save_flag_page addr %lx, shift %lx\n", addr, addr >> TARGET_PAGE_BITS);
+#endif
             break;
 
         case RAM_SAVE_FLAG_COMPRESS_PAGE:
+#if COUNT_SR_SKIPS == 1
+            if (rb_tmp) {
+                inc_ramblock_restored(rb_tmp);
+            }
+#endif
             len = qemu_get_be32(f);
             if (len < 0 || len > compressBound(TARGET_PAGE_SIZE)) {
                 error_report("Invalid compressed data length: %d", len);
                 ret = -EINVAL;
                 break;
             }
+#if DBG_SELECT_RESTORE == 1
+#ifdef DBG_SELECT_RESTORE_NAME
+            if(name && strcmp(name, DBG_SELECT_RESTORE_NAME) == 0)
+#endif
+                printf("ram_save_flag_compress_page addr %lx, shift %lx\n", addr, addr >> TARGET_PAGE_BITS);
+#endif
             decompress_data_with_multi_threads(f, host, len);
             break;
 
         case RAM_SAVE_FLAG_XBZRLE:
+#if COUNT_SR_SKIPS == 1
+            if (rb_tmp) {
+                inc_ramblock_restored(rb_tmp);
+            }
+#endif
+#if DBG_SELECT_RESTORE == 1
+#ifdef DBG_SELECT_RESTORE_NAME
+            if(name && strcmp(name, DBG_SELECT_RESTORE_NAME) == 0)
+#endif
+                printf("ram_save_flag_xbzrle addr %lx, shift %lx\n", addr, addr >> TARGET_PAGE_BITS);
+#endif
             if (load_xbzrle(f, addr, host) < 0) {
                 error_report("Failed to decompress XBZRLE page at "
                              RAM_ADDR_FMT, addr);
@@ -4419,6 +4671,10 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
     if (!ret  && migration_incoming_in_colo_state()) {
         colo_flush_ram_cache();
     }
+
+#if COUNT_SR_SKIPS == 1
+   print_ramblock_skipped();
+#endif
     return ret;
 }
 

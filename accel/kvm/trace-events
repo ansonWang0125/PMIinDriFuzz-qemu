@@ -1,5 +1,8 @@
 # See docs/devel/tracing.txt for syntax documentation.
 
+kvm_get_dirty_pages_log_range(uint64_t start, uint64_t pages) "start 0x%" PRIx64 " pages 0x%" PRIx64
+kvm_log_sync(void) ""
+
 # kvm-all.c
 kvm_ioctl(int type, void *arg) "type 0x%x, arg %p"
 kvm_vm_ioctl(int type, void *arg) "type 0x%x, arg %p"

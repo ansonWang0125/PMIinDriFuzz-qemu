@@ -434,6 +434,20 @@ Show the currently saved VM snapshots.
 ETEXI
 
     {
+        .name       = "snapshots-minimal",
+        .args_type  = "",
+        .params     = "",
+        .help       = "show the currently saved minimal VM snapshots",
+        .cmd        = hmp_info_snapshots_minimal,
+    },
+
+STEXI
+@item info snapshots-minimal
+@findex info snapshots-minimal
+Show the currently saved minimal VM snapshots.
+ETEXI
+
+    {
         .name       = "status",
         .args_type  = "",
         .params     = "",

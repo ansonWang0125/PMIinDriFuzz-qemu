@@ -3877,6 +3877,23 @@ STEXI
 Set TB size.
 ETEXI
 
+DEF("fuzzer", HAS_ARG, QEMU_OPTION_fuzzer, \
+    "-fuzzer afl:st_pipe,ctl_pipe\n" \
+    "                accept fuzzer io channel for AFL\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -fuzzer afl:[@var{st_pipe}],@var{ctl_pipe}
+Accept fuzzer io channels for AFL.
+ETEXI
+
+DEF("periscope", HAS_ARG, QEMU_OPTION_periscope, \
+    "-periscope agent=id,vendor=id,device=id,revision=id,[mm]io=size,...\n" \
+    "",
+    QEMU_ARCH_ALL)
+STEXI
+@item -periscope agent=[@var{agent_id}],vendor=[@var{vendor_id}],device=[@var{device_id}],revision=[@var{revision_id}],io=[@var{size}],mmio=[@var{size}],...]
+ETEXI
+
 DEF("incoming", HAS_ARG, QEMU_OPTION_incoming, \
     "-incoming tcp:[host]:port[,to=maxport][,ipv4][,ipv6]\n" \
     "-incoming rdma:host:port[,ipv4][,ipv6]\n" \

@@ -57,4 +57,9 @@ struct QIOChannelBuffer {
 QIOChannelBuffer *
 qio_channel_buffer_new(size_t capacity);
 
+QIOChannelBuffer *
+qio_channel_buffer_new_with_existing_data(uint8_t *data, size_t size);
+
+uint8_t *qio_channel_buffer_close_without_free(QIOChannelBuffer *ioc);
+
 #endif /* QIO_CHANNEL_BUFFER_H */

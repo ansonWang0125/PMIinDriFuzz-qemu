@@ -1316,6 +1316,12 @@ DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty(MemoryRegion *mr,
                                                             hwaddr size,
                                                             unsigned client);
 
+// same as memory_region_snapshot_and_clear_dirty
+// but does not clear qemu internal bitmaps
+DirtyBitmapSnapshot *memory_region_snapshot_and_get_dirty(MemoryRegion *mr,
+                                                            hwaddr addr,
+                                                            hwaddr size,
+                                                            unsigned client);
 /**
  * memory_region_snapshot_get_dirty: Check whether a range of bytes is dirty
  *                                   in the specified dirty bitmap snapshot.

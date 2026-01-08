@@ -301,6 +301,23 @@ out:
     return entry;
 }
 
+static inline uint16_t vtd_make_source_id(uint8_t bus_num, uint8_t devfn)
+{
+    return ((bus_num & 0xffUL) << 8) | (devfn & 0xffUL);
+}
+
+int vtd_lookup_gfn(IntelIOMMUState *s, uint8_t bus_num, uint8_t devfn,
+                   hwaddr addr, uint64_t *gfn)
+{
+    uint16_t source_id = vtd_make_source_id(bus_num, devfn);
+    VTDIOTLBEntry *entry = vtd_lookup_iotlb(s, source_id, addr);
+    if (!entry) {
+        return -1;
+    }
+    *gfn = entry->gfn;
+    return 0;
+}
+
 /* Must be with IOMMU lock held */
 static void vtd_update_iotlb(IntelIOMMUState *s, uint16_t source_id,
                              uint16_t domain_id, hwaddr addr, uint64_t slpte,
@@ -1358,6 +1375,77 @@ static int vtd_dev_to_context_entry(IntelIOMMUState *s, uint8_t bus_num,
     return 0;
 }
 
+int vtd_dev_to_domain_id(IntelIOMMUState *s, uint8_t bus_num,
+                         uint8_t devfn, uint16_t *domain_id)
+{
+    VTDContextEntry ce;
+    int ret = vtd_dev_to_context_entry(s, bus_num, devfn, &ce);
+    if (ret == 0) {
+        *domain_id = VTD_CONTEXT_ENTRY_DID(ce.hi);
+    }
+    return ret;
+}
+
+
+int vtd_iova_to_gpa_writable(IntelIOMMUState *s, uint8_t bus_num,
+                    uint8_t devfn, uint64_t iova, uint64_t *gpa) {
+    VTDContextEntry ce;
+    int ret = vtd_dev_to_context_entry(s, bus_num, devfn, &ce);
+    if (ret < 0) {
+        return ret;
+    }
+
+    bool is_write = true;
+    uint64_t slpte;
+    uint32_t slpte_level;
+    bool reads, writes;
+
+    uint8_t aw_bits = VTD_HOST_ADDRESS_WIDTH;
+
+    ret = vtd_iova_to_slpte(s, &ce, iova, is_write,
+                            &slpte, &slpte_level,
+                            &reads, &writes, aw_bits);
+    if (ret < 0) {
+        return ret;
+    }
+
+    uint64_t page_mask = vtd_slpt_level_page_mask(slpte_level);
+
+    *gpa = vtd_get_slpte_addr(slpte, aw_bits) & page_mask;
+
+    return 0;
+}
+
+
+int vtd_iova_to_gpa(IntelIOMMUState *s, uint8_t bus_num,
+                    uint8_t devfn, uint64_t iova, uint64_t *gpa) {
+    VTDContextEntry ce;
+    int ret = vtd_dev_to_context_entry(s, bus_num, devfn, &ce);
+    if (ret < 0) {
+        return ret;
+    }
+
+    bool is_write = false;
+    uint64_t slpte;
+    uint32_t slpte_level;
+    bool reads, writes;
+
+    uint8_t aw_bits = VTD_HOST_ADDRESS_WIDTH;
+
+    ret = vtd_iova_to_slpte(s, &ce, iova, is_write,
+                            &slpte, &slpte_level,
+                            &reads, &writes, aw_bits);
+    if (ret < 0) {
+        return ret;
+    }
+
+    uint64_t page_mask = vtd_slpt_level_page_mask(slpte_level);
+
+    *gpa = vtd_get_slpte_addr(slpte, aw_bits) & page_mask;
+
+    return 0;
+}
+
 static int vtd_sync_shadow_page_hook(IOMMUTLBEntry *entry,
                                      void *private)
 {
@@ -1523,11 +1611,6 @@ static void vtd_switch_address_space_all(IntelIOMMUState *s)
             vtd_switch_address_space(vtd_bus->dev_as[i]);
         }
     }
-}
-
-static inline uint16_t vtd_make_source_id(uint8_t bus_num, uint8_t devfn)
-{
-    return ((bus_num & 0xffUL) << 8) | (devfn & 0xffUL);
 }
 
 static const bool vtd_qualified_faults[] = {

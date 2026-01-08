@@ -22,11 +22,13 @@
 #ifndef CONFIG_USER_ONLY
 #include "hw/xen/xen.h"
 #include "exec/ramlist.h"
+#include "migration/periscope-delta-snap.h"
 
 struct RAMBlock {
     struct rcu_head rcu;
     struct MemoryRegion *mr;
     uint8_t *host;
+    uint8_t *host_restore;
     uint8_t *colo_cache; /* For colo, VM's ram cache */
     ram_addr_t offset;
     ram_addr_t used_length;
@@ -35,13 +37,17 @@ struct RAMBlock {
     uint32_t flags;
     /* Protected by iothread lock.  */
     char idstr[256];
-    /* RCU-enabled, writes protected by the ramlist lock */
+   /* RCU-enabled, writes protected by the ramlist lock */
     QLIST_ENTRY(RAMBlock) next;
     QLIST_HEAD(, RAMBlockNotifier) ramblock_notifiers;
     int fd;
     size_t page_size;
     /* dirty bitmap used during migration */
     unsigned long *bmap;
+    unsigned long *bmap_delta_restore; // tracks dirty pages, used to only restore dirty pages in ram_load
+    unsigned long *bmap_delta_snap; // also tracks dirty pages, used to only save dirty pages in ram_save_host_page
+    size_t skipped;
+    size_t restored;
     /* bitmap of pages that haven't been sent even once
      * only maintained and used in postcopy at the moment
      * where it's used to send the dirtymap at the start
@@ -214,7 +220,9 @@ static inline bool cpu_physical_memory_is_clean(ram_addr_t addr)
     bool code = cpu_physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_CODE);
     bool migration =
         cpu_physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_MIGRATION);
-    return !(vga && code && migration);
+    bool delta =
+        cpu_physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_DELTA);
+    return !(vga && code && migration && delta);
 }
 
 static inline uint8_t cpu_physical_memory_range_includes_clean(ram_addr_t start,
@@ -234,6 +242,10 @@ static inline uint8_t cpu_physical_memory_range_includes_clean(ram_addr_t start,
     if (mask & (1 << DIRTY_MEMORY_MIGRATION) &&
         !cpu_physical_memory_all_dirty(start, length, DIRTY_MEMORY_MIGRATION)) {
         ret |= (1 << DIRTY_MEMORY_MIGRATION);
+    }
+    if (mask & (1 << DIRTY_MEMORY_DELTA) &&
+        !cpu_physical_memory_all_dirty(start, length, DIRTY_MEMORY_DELTA)) {
+        ret |= (1 << DIRTY_MEMORY_DELTA);
     }
     return ret;
 }
@@ -299,6 +311,12 @@ static inline void cpu_physical_memory_set_dirty_range(ram_addr_t start,
             bitmap_set_atomic(blocks[DIRTY_MEMORY_CODE]->blocks[idx],
                               offset, next - page);
         }
+        // TODO: for now we always update the delta bitmap until we find
+        // out where exactly we are loosing the pages
+        if (unlikely(mask & (1 << DIRTY_MEMORY_DELTA))) {
+            bitmap_set_atomic(blocks[DIRTY_MEMORY_DELTA]->blocks[idx],
+                              offset, next - page);
+        }
 
         page = next;
         idx++;
@@ -352,6 +370,7 @@ static inline void cpu_physical_memory_set_dirty_lebitmap(unsigned long *bitmap,
                 if (tcg_enabled()) {
                     atomic_or(&blocks[DIRTY_MEMORY_CODE][idx][offset], temp);
                 }
+                atomic_or(&blocks[DIRTY_MEMORY_DELTA][idx][offset], temp);
             }
 
             if (++offset >= BITS_TO_LONGS(DIRTY_MEMORY_BLOCK_SIZE)) {
@@ -391,6 +410,10 @@ bool cpu_physical_memory_test_and_clear_dirty(ram_addr_t start,
                                               ram_addr_t length,
                                               unsigned client);
 
+// same as cpu_physical_memory_snapshot_and_clear_dirty
+// but does not clear qemu internal bitmaps
+DirtyBitmapSnapshot *cpu_physical_memory_snapshot_and_get_dirty
+    (ram_addr_t start, ram_addr_t length, unsigned client);
 DirtyBitmapSnapshot *cpu_physical_memory_snapshot_and_clear_dirty
     (ram_addr_t start, ram_addr_t length, unsigned client);
 
@@ -404,6 +427,7 @@ static inline void cpu_physical_memory_clear_dirty_range(ram_addr_t start,
     cpu_physical_memory_test_and_clear_dirty(start, length, DIRTY_MEMORY_MIGRATION);
     cpu_physical_memory_test_and_clear_dirty(start, length, DIRTY_MEMORY_VGA);
     cpu_physical_memory_test_and_clear_dirty(start, length, DIRTY_MEMORY_CODE);
+    cpu_physical_memory_test_and_clear_dirty(start, length, DIRTY_MEMORY_DELTA);
 }
 
 

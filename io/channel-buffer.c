@@ -40,6 +40,20 @@ qio_channel_buffer_new(size_t capacity)
 }
 
 
+QIOChannelBuffer *
+qio_channel_buffer_new_with_existing_data(uint8_t *data, size_t size)
+{
+    QIOChannelBuffer *ioc;
+
+    ioc = QIO_CHANNEL_BUFFER(object_new(TYPE_QIO_CHANNEL_BUFFER));
+
+    ioc->data = data;
+    ioc->capacity = ioc->usage = size;
+
+    return ioc;
+}
+
+
 static void qio_channel_buffer_finalize(Object *obj)
 {
     QIOChannelBuffer *ioc = QIO_CHANNEL_BUFFER(obj);
@@ -144,6 +158,16 @@ static int qio_channel_buffer_close(QIOChannel *ioc,
     bioc->capacity = bioc->usage = bioc->offset = 0;
 
     return 0;
+}
+
+
+uint8_t *qio_channel_buffer_close_without_free(QIOChannelBuffer *bioc)
+{
+    uint8_t *data = bioc->data;
+    bioc->data = NULL;
+    bioc->capacity = bioc->usage = bioc->offset = 0;
+
+    return data;
 }
 
 

@@ -38,6 +38,7 @@
 #include "qapi/qapi-commands-run-state.h"
 #include "qapi/qapi-commands-tpm.h"
 #include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-commands-kcov.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/string-input-visitor.h"
@@ -1466,12 +1467,40 @@ void hmp_loadvm(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &err);
 }
 
+void hmp_loadvm_minimal(Monitor *mon, const QDict *qdict)
+{
+    printf("TODO: hmp_loadvm_minimal\n");
+
+#if 0
+    int saved_vm_running  = runstate_is_running();
+    const char *name = qdict_get_str(qdict, "name");
+    Error *err = NULL;
+    vm_stop(RUN_STATE_RESTORE_VM);
+
+    if (load_snapshot(name, &err) == 0 && saved_vm_running) {
+        vm_start();
+    }
+    hmp_handle_error(mon, &err);
+#endif
+}
+
 void hmp_savevm(Monitor *mon, const QDict *qdict)
 {
     Error *err = NULL;
 
     save_snapshot(qdict_get_try_str(qdict, "name"), &err);
     hmp_handle_error(mon, &err);
+}
+
+void hmp_savevm_minimal(Monitor *mon, const QDict *qdict)
+{
+    printf("TODO: hmp_savevm_minimal\n");
+#if 0
+    Error *err = NULL;
+
+    save_snapshot(qdict_get_try_str(qdict, "name"), &err);
+    hmp_handle_error(mon, &err);
+#endif
 }
 
 void hmp_delvm(Monitor *mon, const QDict *qdict)
@@ -1628,6 +1657,11 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
     g_free(sn_tab);
     g_free(global_snapshots);
 
+}
+
+void hmp_info_snapshots_minimal(Monitor *mon, const QDict *qdict)
+{
+    printf("TODO: hmp_info_snapshots_minimal\n");
 }
 
 void hmp_announce_self(Monitor *mon, const QDict *qdict)
@@ -3153,4 +3187,21 @@ void hmp_info_memory_size_summary(Monitor *mon, const QDict *qdict)
         qapi_free_MemoryInfo(info);
     }
     hmp_handle_error(mon, &err);
+}
+
+void hmp_kcov_get_area_offset(Monitor *mon, const QDict *qdict)
+{
+	qmp_kcov_get_area_offset(NULL);
+}
+
+void hmp_kcov_ioctl(Monitor *mon, const QDict *qdict)
+{
+	int64_t cmd = qdict_get_int(qdict, "cmd");
+	int64_t arg = qdict_get_int(qdict, "arg");
+	qmp_kcov_ioctl(cmd, arg, NULL);
+}
+
+void hmp_kcov_print_coverage(Monitor *mon, const QDict *qdict)
+{
+   qmp_kcov_print_coverage(NULL);
 }

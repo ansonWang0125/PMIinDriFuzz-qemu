@@ -20,6 +20,8 @@
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "qjson.h"
+#include "migration/periscope_perf_switches.h"
+#include "migration/periscope-delta-snap.h"
 
 static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
                                    void *opaque, QJSON *vmdesc);
@@ -165,7 +167,7 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
     if (ret != 0) {
         return ret;
     }
-    if (vmsd->post_load) {
+    if (vmsd->post_load && !quick_reset_devs) {
         ret = vmsd->post_load(opaque, version_id);
     }
     trace_vmstate_load_state_end(vmsd->name, "end", ret);

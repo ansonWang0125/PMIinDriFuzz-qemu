@@ -583,6 +583,8 @@ static int vapic_map_rom_writable(VAPICROMState *s)
     as = sysbus_address_space(&s->busdev);
 
     if (s->rom_mapped_writable) {
+        // XXX this only works for resets done by periscope!
+        return 0;
         memory_region_del_subregion(as, &s->rom);
         object_unparent(OBJECT(&s->rom));
     }

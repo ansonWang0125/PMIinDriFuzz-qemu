@@ -358,6 +358,7 @@ int kvm_arch_handle_exit(CPUState *cpu, struct kvm_run *run);
 int kvm_arch_process_async_events(CPUState *cpu);
 
 int kvm_arch_get_registers(CPUState *cpu);
+target_ulong kvm_arch_get_kvm_rip(CPUState *cpu);
 
 /* state subset only touched by the VCPU itself during runtime */
 #define KVM_PUT_RUNTIME_STATE   1
@@ -547,4 +548,8 @@ int kvm_set_one_reg(CPUState *cs, uint64_t id, void *source);
 int kvm_get_one_reg(CPUState *cs, uint64_t id, void *target);
 struct ppc_radix_page_info *kvm_get_radix_page_info(void);
 int kvm_get_max_memslots(void);
+
+int kvm_enable_dma_trace(uint64_t gpa);
+int kvm_disable_dma_trace(uint64_t gpa);
+int kvm_update_user_memory_region(void* old, void* new, size_t len);
 #endif

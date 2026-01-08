@@ -1822,6 +1822,11 @@ uint8_t memory_region_get_dirty_log_mask(MemoryRegion *mr)
     if (global_dirty_log && mr->ram_block) {
         mask |= (1 << DIRTY_MEMORY_MIGRATION);
     }
+#ifdef ENABLE_LW_CHKPT
+    mask |= (1 << DIRTY_MEMORY_DELTA);
+#else
+    printf("WARNING DIRTY_MEMORY_DELTA will be missing bytes\n");
+#endif
     return mask;
 }
 
@@ -2070,6 +2075,18 @@ static void memory_region_sync_dirty_bitmap(MemoryRegion *mr)
         flatview_unref(view);
     }
 }
+
+DirtyBitmapSnapshot *memory_region_snapshot_and_get_dirty(MemoryRegion *mr,
+                                                            hwaddr addr,
+                                                            hwaddr size,
+                                                            unsigned client)
+{
+    assert(mr->ram_block);
+    memory_region_sync_dirty_bitmap(mr);
+    return cpu_physical_memory_snapshot_and_get_dirty(
+                memory_region_get_ram_addr(mr) + addr, size, client);
+}
+
 
 DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty(MemoryRegion *mr,
                                                             hwaddr addr,

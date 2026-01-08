@@ -34,6 +34,7 @@
 #include "qapi/qapi-commands-block-core.h"
 #include "qapi/qapi-commands-misc.h"
 #include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-commands-kcov.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/qobject-input-visitor.h"
@@ -41,6 +42,8 @@
 #include "qom/object_interfaces.h"
 #include "hw/mem/memory-device.h"
 #include "hw/acpi/acpi_dev_interface.h"
+#include "hw/pci/pci.h"
+#include "hw/periscope/kcov_vdev.h"
 
 NameInfo *qmp_query_name(Error **errp)
 {
@@ -716,4 +719,29 @@ MemoryInfo *qmp_query_memory_size_summary(Error **errp)
         mem_info->plugged_memory != (uint64_t)-1;
 
     return mem_info;
+}
+
+KcovArea* qmp_kcov_get_area_offset(Error **errp)
+{
+   PCIDevice *p = get_pcidev_by_name("kcov_vdev");
+   if(p)
+      kcov_get_area_offset(p);
+   else
+      printf("Error no device kcov_vdev\n");
+   return NULL;
+}
+
+void qmp_kcov_print_coverage(Error **errp)
+{
+   kcov_print_coverage();
+}
+
+void qmp_kcov_ioctl(int64_t cmd, int64_t arg, Error **errp)
+{
+   printf("%s: %lx, %lx\n", __FUNCTION__, cmd, arg);
+   PCIDevice *p = get_pcidev_by_name("kcov_vdev");
+   if(p)
+      kcov_ioctl(p, cmd, arg);
+   else
+      printf("Error no device kcov_vdev\n");
 }

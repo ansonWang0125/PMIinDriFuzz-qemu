@@ -77,6 +77,7 @@
 #include "hw/i386/intel_iommu.h"
 #include "hw/net/ne2000-isa.h"
 #include "standard-headers/asm-x86/bootparam.h"
+#include "migration/periscope_perf_switches.h"
 
 /* debug PC/ISA interrupts */
 //#define DEBUG_IRQ
@@ -2624,7 +2625,7 @@ static void pc_machine_reset(void)
     CPUState *cs;
     X86CPU *cpu;
 
-    qemu_devices_reset();
+    if(!quick_reset_devs) qemu_devices_reset();
 
     /* Reset APIC after devices have been reset to cancel
      * any changes that qemu_devices_reset() might have done.
@@ -2633,7 +2634,7 @@ static void pc_machine_reset(void)
         cpu = X86_CPU(cs);
 
         if (cpu->apic_state) {
-            device_reset(cpu->apic_state);
+            if(!quick_reset_devs) device_reset(cpu->apic_state);
         }
     }
 }

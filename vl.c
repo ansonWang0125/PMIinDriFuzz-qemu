@@ -30,6 +30,7 @@
 #include "qemu/help_option.h"
 #include "qemu/uuid.h"
 #include "sysemu/seccomp.h"
+#include "migration/periscope.h"
 
 #ifdef CONFIG_SDL
 #if defined(__APPLE__) || defined(main)
@@ -128,6 +129,8 @@ int main(int argc, char **argv)
 #include "qapi/qapi-commands-ui.h"
 #include "qapi/qmp/qerror.h"
 #include "sysemu/iothread.h"
+#include "migration/periscope_perf_switches.h"
+#include "migration/periscope-timers.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 
@@ -1719,7 +1722,7 @@ void qemu_system_reset(ShutdownCause reason)
     if (mc && mc->reset) {
         mc->reset();
     } else {
-        qemu_devices_reset();
+       if(!quick_reset_devs) qemu_devices_reset();
     }
     if (reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         qapi_event_send_reset(shutdown_caused_by_guest(reason), reason);
@@ -1766,6 +1769,12 @@ void qemu_system_guest_panicked(GuestPanicInformation *info)
 
 void qemu_system_reset_request(ShutdownCause reason)
 {
+    if (reason == SHUTDOWN_CAUSE_GUEST_RESET) {
+        if (periscope_guest_crashed() == PERISCOPE_GUEST_SUSPEND) {
+            qemu_system_suspend_request();
+            return;
+        }
+    }
     if (no_reboot && reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         shutdown_requested = reason;
     } else {
@@ -1863,6 +1872,11 @@ void qemu_system_killed(int signal, pid_t pid)
 void qemu_system_shutdown_request(ShutdownCause reason)
 {
     trace_qemu_system_shutdown_request(reason);
+
+    if (periscope_system_shutdown_request(reason) == 0) {
+        return;
+    }
+
     replay_shutdown_request(reason);
     shutdown_requested = reason;
     qemu_notify_event();
@@ -1907,6 +1921,7 @@ static bool main_loop_should_exit(void)
 {
     RunState r;
     ShutdownCause request;
+    uint64_t periscope_request;
 
     if (preconfig_exit_requested) {
         if (runstate_check(RUN_STATE_PRECONFIG)) {
@@ -1940,6 +1955,36 @@ static bool main_loop_should_exit(void)
                 !runstate_check(RUN_STATE_INMIGRATE)) {
             runstate_set(RUN_STATE_PRELAUNCH);
         }
+    }
+    periscope_request = periscope_checkpoint_requested();
+    if (periscope_request) {
+        pause_all_vcpus();
+
+        uint64_t id = periscope_request;
+        periscope_checkpoint(id);
+
+        if (!periscope_restore_requested()) {
+            // restart logging after checkpointing
+            memory_global_dirty_log_start();
+
+            resume_all_vcpus();
+        }
+    }
+    periscope_request = periscope_restore_requested();
+    if (periscope_request) {
+        pause_all_vcpus();
+
+        periscope_restore();
+
+        // restart logging again after restoring
+        memory_global_dirty_log_start();
+
+        resume_all_vcpus();
+    }
+    if (periscope_snapshot_and_restore_baseline_requested()) {
+        pause_all_vcpus();
+        periscope_snapshot_and_restore_baseline();
+        resume_all_vcpus();
     }
     if (qemu_wakeup_requested()) {
         pause_all_vcpus();
@@ -3006,6 +3051,7 @@ int main(int argc, char **argv, char **envp)
     const char *vga_model = NULL;
     const char *qtest_chrdev = NULL;
     const char *qtest_log = NULL;
+    const char *fuzzer = NULL;
     const char *incoming = NULL;
     bool userconfig = true;
     bool nographic = false;
@@ -3793,6 +3839,12 @@ int main(int argc, char **argv, char **envp)
                 if (!icount_opts) {
                     exit(1);
                 }
+                break;
+            case QEMU_OPTION_periscope:
+                periscope_configure_dev(optarg);
+                break;
+            case QEMU_OPTION_fuzzer:
+                fuzzer = optarg;
                 break;
             case QEMU_OPTION_incoming:
                 if (!incoming) {
@@ -4586,6 +4638,24 @@ int main(int argc, char **argv, char **envp)
         dump_vmstate_json_to_file(vmstate_dump_file);
         return 0;
     }
+
+    if (fuzzer) { // FIXME: legacy
+        Error *local_err = NULL;
+        periscope_start_fuzzer(fuzzer, &local_err);
+        if (local_err) {
+            error_reportf_err(local_err, "-fuzzer %s: ", incoming);
+            exit(1);
+        }
+    }
+#ifdef PERISCOPE_TIMERS
+    add_timer("periscope_afl.timer");
+    add_timer("periscope_kvm_run.timer");
+    add_timer("periscope_checkpoint.timer");
+    add_timer("periscope_quick_checkpoint.timer");
+    add_timer("periscope_restore.timer");
+    add_timer("periscope_quick_restore.timer");
+    add_timer("periscope_fuzz_interation.timer");
+#endif
 
     if (incoming) {
         Error *local_err = NULL;

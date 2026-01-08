@@ -283,4 +283,15 @@ struct IntelIOMMUState {
  */
 VTDAddressSpace *vtd_find_add_as(IntelIOMMUState *s, PCIBus *bus, int devfn);
 
+int vtd_dev_to_domain_id(IntelIOMMUState *s, uint8_t bus_num,
+                         uint8_t devfn, uint16_t *domain_id);
+
+int vtd_lookup_gfn(IntelIOMMUState *s, uint8_t bus_num, uint8_t devfn,
+                   hwaddr addr, uint64_t *gfn);
+
+int vtd_iova_to_gpa_writable(IntelIOMMUState *s, uint8_t bus_num,
+                    uint8_t devfn, uint64_t iova, uint64_t *gpa);
+int vtd_iova_to_gpa(IntelIOMMUState *s, uint8_t bus_num,
+                    uint8_t devfn, uint64_t iova, uint64_t *gpa);
+
 #endif

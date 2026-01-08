@@ -12,7 +12,7 @@ endif
 
 $(call set-vpath, $(SRC_PATH):$(BUILD_DIR))
 ifdef CONFIG_LINUX
-QEMU_CFLAGS += -I../linux-headers
+QEMU_CFLAGS += -I../linux-headers -msse2 -msse -march=native -maes
 endif
 QEMU_CFLAGS += -iquote .. -iquote $(SRC_PATH)/target/$(TARGET_BASE_ARCH) -DNEED_CPU_H
 
@@ -157,6 +157,7 @@ obj-y += memory_mapping.o
 obj-y += dump.o
 obj-$(TARGET_X86_64) += win_dump.o
 obj-y += migration/ram.o
+obj-$(CONFIG_PERISCOPE) += migration/periscope.o migration/periscope-syzkaller.o migration/periscope-profiler.o migration/periscope-afl.o migration/periscope-exec.o migration/periscope-kcov.o migration/periscope_dma.o migration/periscope-timers.o migration/periscope-delta-snap-hash.o
 LIBS := $(libs_softmmu) $(LIBS)
 
 # Hardware support

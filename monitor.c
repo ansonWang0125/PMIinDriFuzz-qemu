@@ -3972,6 +3972,17 @@ void loadvm_completion(ReadLineState *rs, int nb_args, const char *str)
     }
 }
 
+void loadvm_minimal_completion(ReadLineState *rs, int nb_args, const char *str)
+{
+    printf("TODO: loadvm_minimal_completion\n");
+
+#if 0
+    if (nb_args == 2) {
+        vm_completion(rs, str);
+    }
+#endif
+}
+
 static void monitor_find_completion_by_table(Monitor *mon,
                                              const mon_cmd_t *cmd_table,
                                              char **args,

@@ -368,6 +368,23 @@ only @var{tag} as parameter.
 ETEXI
 
     {
+        .name       = "savevm-minimal",
+        .args_type  = "name:s?",
+        .params     = "[tag|id]",
+        .help       = "save a VM snapshot. If no tag or id are provided, a new snapshot is created",
+        .cmd        = hmp_savevm_minimal,
+    },
+
+STEXI
+@item savevm-minimal [@var{tag}|@var{id}]
+@findex savevm-minimal
+Create a snapshot of the whole virtual machine. If @var{tag} is
+provided, it is used as human readable identifier. If there is already
+a snapshot with the same tag or ID, it is replaced. More info at
+@ref{vm_snapshots}.
+ETEXI
+
+    {
         .name       = "loadvm",
         .args_type  = "name:s",
         .params     = "tag",
@@ -383,6 +400,22 @@ Set the whole virtual machine to the snapshot identified by the tag
 @var{tag}.
 
 Since 4.0, loadvm stopped accepting snapshot id as parameter.
+ETEXI
+
+    {
+        .name       = "loadvm-minimal",
+        .args_type  = "name:s",
+        .params     = "tag|id",
+        .help       = "restore a VM snapshot from its tag or id",
+        .cmd        = hmp_loadvm_minimal,
+        .command_completion = loadvm_minimal_completion,
+    },
+
+STEXI
+@item loadvm-minimal @var{tag}|@var{id}
+@findex loadvm-minimal
+Set the whole virtual machine to the snapshot identified by the tag
+@var{tag} or the unique snapshot ID @var{id}.
 ETEXI
 
     {
@@ -1912,6 +1945,39 @@ STEXI
 @item qom-set @var{path} @var{property} @var{value}
 Set QOM property @var{property} of object at location @var{path} to value @var{value}
 ETEXI
+{
+		.name       = "kcov-ioctl",
+		.args_type  = "cmd:i,arg:i",
+		.params     = "cmd,arg",
+		.help       = "kcov-ioctl cmd arg",
+		.cmd        = hmp_kcov_ioctl,
+},
+STEXI
+@item kcov-ioctl  @var{cmd} @var{arg}
+Exec kcov-ioctl @var{cmd} @var{arg}.
+ETEXI
+{
+		.name       = "kcov-get-area-offset",
+		.args_type  = "",
+		.params     = "",
+		.help       = "kcov-get-area-offset",
+		.cmd        = hmp_kcov_get_area_offset,
+},
+STEXI
+@item kcov-get-area-offset
+Exec kcov-get-area-offset
+ETEXI
+{
+		.name       = "kcov-print-coverage",
+		.args_type  = "",
+		.params     = "",
+		.help       = "kcov-print-coverage",
+		.cmd        = hmp_kcov_print_coverage,
+},
+STEXI
+@item kcov-print-coverage
+Exec kcov-print-coverage
+ETEXI
 
     {
         .name       = "info",
@@ -1926,3 +1992,4 @@ ETEXI
 STEXI
 @end table
 ETEXI
+

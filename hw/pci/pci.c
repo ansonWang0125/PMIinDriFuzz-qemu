@@ -1671,6 +1671,35 @@ static void pci_for_each_device_under_bus(PCIBus *bus,
     }
 }
 
+PCIDevice *get_pcidev_by_name(const char* name)
+{
+    PCIDevice *d;
+    int devfn;
+
+    if(!name)
+       return NULL;
+
+    PCIHostState *host_bridge;
+    QLIST_FOREACH(host_bridge, &pci_host_bridges, next) {
+       for(devfn = 0; devfn < ARRAY_SIZE(host_bridge->bus->devices); devfn++) {
+          d = host_bridge->bus->devices[devfn];
+          if (d && d->name && strncmp(d->name, name, strlen(name)) == 0) {
+             return d;
+          }
+       }
+    }
+    return NULL;
+}
+//void pci_for_each_device_xxx(
+//                         void (*fn)(PCIBus *b, PCIDevice *d, void *opaque),
+//                         void *opaque)
+//{
+//   PCIHostState *host_bridge;
+//   QLIST_FOREACH(host_bridge, &pci_host_bridges, next) {
+//      pci_for_each_device_under_bus(host_bridge->bus, fn, opaque);
+//   }
+//}
+
 void pci_for_each_device(PCIBus *bus, int bus_num,
                          void (*fn)(PCIBus *b, PCIDevice *d, void *opaque),
                          void *opaque)

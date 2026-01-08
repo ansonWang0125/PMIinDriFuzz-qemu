@@ -31,6 +31,8 @@
 #include "exec/gdbstub.h"
 #include "sysemu/kvm_int.h"
 #include "sysemu/cpus.h"
+#include "migration/periscope.h"
+#include "migration/periscope_dma.h"
 #include "qemu/bswap.h"
 #include "exec/memory.h"
 #include "exec/ram_addr.h"
@@ -40,8 +42,11 @@
 #include "hw/irq.h"
 #include "sysemu/sev.h"
 #include "sysemu/balloon.h"
+#include "migration/periscope-timers.h"
 
 #include "hw/boards.h"
+
+#include "qemu/cutils.h"
 
 /* This check must be after config-host.h is included */
 #ifdef CONFIG_EVENTFD
@@ -258,6 +263,58 @@ int kvm_physical_memory_addr_from_host(KVMState *s, void *ram,
     return 0;
 }
 
+int kvm_update_user_memory_region(void* old, void* new, size_t len)
+{
+    KVMState *s = kvm_state;
+    KVMMemoryListener *kml = &s->memory_listener;
+    void *rnew = NULL;
+    int ret = 0;
+
+    //static qemu_timeval tv_restore_begin, tv_restore_end;
+    //qemu_gettimeofday(&tv_restore_begin);
+
+    for (int i = 0; i < s->nr_slots; i++) {
+        KVMSlot *slot = &kml->slots[i];
+        if(i>6) break;
+        if ((old <= slot->ram && old + len > slot->ram)) {
+            struct kvm_userspace_memory_region mem;
+            rnew = new + (slot->ram - old);
+
+            mem.guest_phys_addr = slot->start_addr;
+            mem.userspace_addr = (unsigned long)slot->ram;
+            mem.flags = slot->flags;
+
+            mem.slot = slot->slot | ((kml->as_id) << 16);
+
+            /* Set the slot size to 0 before setting the slot to the desired
+             * value. This is needed based on KVM commit 75d61fbc. */
+            //mem.memory_size = 0;
+
+            //kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem);
+
+            mem.memory_size = slot->memory_size;
+
+
+            mem.userspace_addr = (unsigned long)rnew;
+            //ret = kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem);
+            ret = kvm_vm_ioctl(s, KVM_UPDATE_USER_MEMORY_REGION, &mem);
+            slot->old_flags = mem.flags;
+            slot->ram = rnew;
+            trace_kvm_set_user_memory(mem.slot, mem.flags, mem.guest_phys_addr,
+                  mem.memory_size, mem.userspace_addr, ret);
+
+        }
+    }
+
+    //qemu_timeval elapsed;
+    //timersub(&tv_restore_end, &tv_restore_begin, &elapsed);
+    //printf("periscope: reset mem time %lu ms\n",
+    //      elapsed.tv_sec * 1000L + elapsed.tv_usec / 1000L);
+
+    return ret;
+}
+
+
 static int kvm_set_user_memory_region(KVMMemoryListener *kml, KVMSlot *slot, bool new)
 {
     KVMState *s = kvm_state;
@@ -465,6 +522,8 @@ static int kvm_get_dirty_pages_log_range(MemoryRegionSection *section,
     ram_addr_t start = section->offset_within_region +
                        memory_region_get_ram_addr(section->mr);
     ram_addr_t pages = int128_get64(section->size) / getpagesize();
+
+    trace_kvm_get_dirty_pages_log_range(start, pages);
 
     cpu_physical_memory_set_dirty_lebitmap(bitmap, start, pages);
     return 0;
@@ -845,6 +904,8 @@ static void kvm_log_sync(MemoryListener *listener,
 {
     KVMMemoryListener *kml = container_of(listener, KVMMemoryListener, listener);
     int r;
+
+    trace_kvm_log_sync();
 
     r = kvm_physical_sync_dirty_bitmap(kml, section);
     if (r < 0) {
@@ -1768,17 +1829,50 @@ void kvm_set_sigmask_len(KVMState *s, unsigned int sigmask_len)
     s->sigmask_len = sigmask_len;
 }
 
-static void kvm_handle_io(uint16_t port, MemTxAttrs attrs, void *data, int direction,
+static void kvm_cpu_kick_self(void);
+
+static void kvm_handle_io(CPUState* cpu,
+                          uint16_t port, MemTxAttrs attrs, void *data, int direction,
                           int size, uint32_t count)
 {
     int i;
     uint8_t *ptr = data;
 
     for (i = 0; i < count; i++) {
+        FlatView *fv = address_space_to_flatview(&address_space_io);
+        hwaddr l;
+        hwaddr addr1;
+        MemoryRegion *mr;
+        l = size;
+        mr = flatview_translate(fv, port, &addr1, &l, false, attrs);
+
+        if (periscope_mmio_check(mr, size, direction == KVM_EXIT_IO_OUT) < 0) {
+            kvm_cpu_kick_self();
+            kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+
+            if (periscope_maybe_checkpoint_request() == 0) {
+                kvm_cpu_synchronize_state(cpu);
+
+                vm_stop(RUN_STATE_SAVE_VM);
+            }
+
+            periscope_restore_request();
+            vm_stop(RUN_STATE_RESTORE_VM);
+            return;
+        }
+
         address_space_rw(&address_space_io, port, attrs,
                          ptr, size,
                          direction == KVM_EXIT_IO_OUT);
+
         ptr += size;
+
+        if (direction != KVM_EXIT_IO_OUT && mr && mr->name &&
+            strstart(mr->name, "periscope-", NULL)) {
+            if (periscope_maybe_checkpoint_request() == 0) {
+                vm_stop(RUN_STATE_SAVE_VM);
+            }
+        }
     }
 }
 
@@ -1942,6 +2036,25 @@ static void kvm_eat_signals(CPUState *cpu)
     } while (sigismember(&chkset, SIG_IPI));
 }
 
+int kvm_enable_dma_trace(uint64_t gpa)
+{
+    KVMState *s = kvm_state;
+    int ret;
+    //printf("%s: Enter\n", __FUNCTION__);
+    ret = kvm_vm_ioctl(s, KVM_ENABLE_DMA_TRACE, gpa);
+    return ret;
+}
+
+int kvm_disable_dma_trace(uint64_t gpa)
+{
+    KVMState *s = kvm_state;
+    int ret;
+    //printf("%s: Enter\n", __FUNCTION__);
+    ret = kvm_vm_ioctl(s, KVM_DISABLE_DMA_TRACE, gpa);
+    return ret;
+}
+
+
 int kvm_cpu_exec(CPUState *cpu)
 {
     struct kvm_run *run = cpu->kvm_run;
@@ -2021,15 +2134,84 @@ int kvm_cpu_exec(CPUState *cpu)
         case KVM_EXIT_IO:
             DPRINTF("handle_io\n");
             /* Called outside BQL */
-            kvm_handle_io(run->io.port, attrs,
+            kvm_handle_io(cpu, run->io.port, attrs,
                           (uint8_t *)run + run->io.data_offset,
                           run->io.direction,
                           run->io.size,
                           run->io.count);
             ret = 0;
+
+            if (periscope_checkpoint_requested() || periscope_restore_requested())
+                ret = EXCP_INTERRUPT;
+
             break;
         case KVM_EXIT_MMIO:
             DPRINTF("handle_mmio\n");
+
+            FlatView *fv = address_space_to_flatview(&address_space_memory);
+            hwaddr l;
+            hwaddr addr1;
+            MemoryRegion *mr;
+            l = run->mmio.len;
+            mr = flatview_translate(fv, run->mmio.phys_addr, &addr1, &l, false, attrs);
+
+            if (periscope_mmio_check(mr, run->mmio.len, run->mmio.is_write) < 0) {
+                kvm_cpu_kick_self();
+                run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+
+                if (periscope_maybe_checkpoint_request() == 0) {
+                    kvm_cpu_synchronize_state(cpu);
+
+                    vm_stop(RUN_STATE_SAVE_VM);
+                }
+
+                periscope_restore_request();
+                vm_stop(RUN_STATE_RESTORE_VM);
+
+                ret = EXCP_INTERRUPT;
+                break;
+            }
+
+            if(mr && mr->name && strcmp(mr->name, "pc.ram") == 0) {
+               periscope_dmar *dmar = periscope_dma_get(run->mmio.phys_addr, 1);
+               if(dmar->mr != NULL) {
+                  if(run->mmio.is_write) {
+                     periscope_dma_write_access(dmar, run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+                     // mirror data to actual guest ram
+                     dma_memory_write(&address_space_memory, run->mmio.phys_addr, run->mmio.data, run->mmio.len);
+                     //printf("written value @ %llx -> %lx\n", run->mmio.phys_addr, *(uint64_t*)run->mmio.data);
+                  } else { // read
+                     for(int i=0; i<run->mmio.len; ++i) { // for each accessed byte (to handle partial overwrites)
+                        int r = periscope_dma_read_access(dmar, run->mmio.phys_addr + i, ((uint8_t*)run->mmio.data) + i);
+                        if(r == 1) { // not fuzzed -> data in guest ram will be left unchanged
+                           //printf("not fuzzing dma @ %llx\n", run->mmio.phys_addr + i);
+                        } else if (r == 0) { // fuzzed
+                           printf("fuzzing dma @ %llx\n", run->mmio.phys_addr);
+
+                           // TODO
+                           // for now set some arbitraty address offset, which falls into the mmio region
+                           // we could also directly invoke the fuzzer
+                           address_space_rw(&address_space_memory,
+                                 dmar->mr->addr + 123, attrs,
+                                 ((uint8_t*)run->mmio.data) + i,
+                                 1,
+                                 run->mmio.is_write);
+
+                           //printf("fuzzed value %lx\n", *((uint64_t*)run->mmio.data)+i);
+                           // mirror data to actual guest ram
+                           dma_memory_write(&address_space_memory, run->mmio.phys_addr + i, ((uint8_t*)run->mmio.data)+i, 1);
+                        } else {
+                           printf("ERROR could not get dma value\n");
+
+                        }
+                     }
+                  }
+                  periscop_dma_maybe_remove(dmar, run->mmio.phys_addr);
+               }
+               ret = 0;
+               break;
+            }
+
             /* Called outside BQL */
             address_space_rw(&address_space_memory,
                              run->mmio.phys_addr, attrs,
@@ -2037,9 +2219,142 @@ int kvm_cpu_exec(CPUState *cpu)
                              run->mmio.len,
                              run->mmio.is_write);
             ret = 0;
+
+            if (!run->mmio.is_write && mr && mr->name &&
+                strstart(mr->name, "periscope-", NULL)) {
+                if (periscope_maybe_checkpoint_request() == 0) {
+                    vm_stop(RUN_STATE_SAVE_VM);
+
+                    ret = EXCP_INTERRUPT;
+                }
+            }
+
+            break;
+
+#ifndef KVM_HC_PERISCOPE
+#define KVM_EXIT_PERISCOPE_GET_PROG 100
+#define KVM_EXIT_PERISCOPE_END 101
+#define KVM_EXIT_PERISCOPE_DEBUG 110
+#endif
+
+        case KVM_EXIT_PERISCOPE_GET_PROG:
+            periscope_notify_boot();
+            run->hypercall.ret = periscope_get_agent_id();
+            ret = 0;
+            break;
+        case KVM_EXIT_PERISCOPE_END:
+            if (should_restore_at_agent_exit(run->hypercall.args[0])) {
+                kvm_cpu_kick_self();
+                run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+
+                // no need for checkpoint here
+                // request a restore right away
+                periscope_restore_request();
+                vm_stop(RUN_STATE_RESTORE_VM);
+
+                ret = EXCP_INTERRUPT;
+                break;
+            }
+            if (should_shutdown_at_agent_exit(run->hypercall.args[0])) {
+                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+                ret = EXCP_INTERRUPT;
+            }
+            ret = 0;
+            break;
+        case KVM_EXIT_PERISCOPE_DEBUG:
+            kvm_cpu_synchronize_state(cpu);
+            ret = 0;
+
+            switch(run->hypercall.args[0]) {
+            case SYZKALLER_HC_ROOT_CHKPT:
+                printf("periscope: root checkpoint requested\n");
+                if (periscope_snapshot_inited()) {
+                    run->hypercall.ret = -1;
+                    ret = 0;
+                    break;
+                }
+                if (periscope_maybe_checkpoint_request() == 0) {
+                    ret = EXCP_INTERRUPT;
+#define FORCE_SKIP_HC
+#undef FORCE_SKIP_HC
+#ifdef FORCE_SKIP_HC
+                    // forcefully skip this hypercall before chkpt
+                    kvm_cpu_synchronize_state(cpu);
+                    X86CPU *x86_cpu = X86_CPU(cpu);
+                    x86_cpu->env.eip += 3; // vm(m)call is 3 bytes
+                    kvm_arch_put_registers(cpu, KVM_PUT_RUNTIME_STATE);
+                    cpu->vcpu_dirty = true;
+
+                    kvm_cpu_kick_self();
+                    run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+#endif
+                }
+                else {
+                    printf("periscope: failed to request root checkpoint\n");
+                }
+                periscope_restore_request();
+                ret = EXCP_INTERRUPT;
+                break;
+            case SYZKALLER_HC_RECV_EXEC:
+                syzkaller_receive_execute(cpu, run->hypercall.args[1]);
+                break;
+            case SYZKALLER_HC_REPLY_EXEC:
+                syzkaller_reply_execute(run->hypercall.args[1]);
+                if (!periscope_snapshot_inited()) {
+                    ret = 0;
+                    break;
+                }
+                periscope_restore_request();
+                ret = EXCP_INTERRUPT;
+                break;
+            case SYZKALLER_HC_RECV_HANDSHAKE:
+                syzkaller_receive_handshake(cpu, run->hypercall.args[1]);
+                ret = 0;
+                break;
+            case SYZKALLER_HC_REPLY_HANDSHAKE:
+                syzkaller_reply_handshake();
+                ret = 0;
+                break;
+            case SYZKALLER_HC_MAYBE_CHKPT:
+                run->hypercall.ret = syzkaller_maybe_checkpoint(run->hypercall.args[1], run->hypercall.args[2]);
+                if (run->hypercall.ret == 0) {
+#ifdef FORCE_SKIP_HC
+                    // forcefully skip this hypercall before chkpt
+                    kvm_cpu_synchronize_state(cpu);
+                    X86CPU *x86_cpu = X86_CPU(cpu);
+                    x86_cpu->env.eip += 3; // vm(m)call is 3 bytes
+                    kvm_arch_put_registers(cpu, KVM_PUT_RUNTIME_STATE);
+                    cpu->vcpu_dirty = true;
+
+                    kvm_cpu_kick_self();
+                    run_ret = kvm_vcpu_ioctl(cpu, KVM_RUN, 0);
+#endif
+                    ret = EXCP_INTERRUPT;
+                    break;
+                }
+                ret = 0;
+                break;
+            case SYZKALLER_HC_FORKSRV_CTX:
+                syzkaller_submit_forkserver_context(run->hypercall.args[1]);
+                ret = 0;
+                break;
+            case PERISCOPE_DEBUG_HC_BENCHMARK:
+                periscope_benchmark_hypercall(run->hypercall.args[1]);
+                break;
+            case PERISCOPE_DEBUG_HC_NEXT:
+                periscope_fetch_next_input();
+                ret = 0;
+                break;
+            default:
+                periscope_debug_hypercall(run->hypercall.args[0], run->hypercall.args[1], run->hypercall.args[2]);
+                ret = 0;
+                break;
+            }
             break;
         case KVM_EXIT_IRQ_WINDOW_OPEN:
             DPRINTF("irq_window_open\n");
+            if (periscope_irq_check() == 0) {
+            }
             ret = EXCP_INTERRUPT;
             break;
         case KVM_EXIT_SHUTDOWN:
@@ -2048,6 +2363,7 @@ int kvm_cpu_exec(CPUState *cpu)
             ret = EXCP_INTERRUPT;
             break;
         case KVM_EXIT_UNKNOWN:
+            printf("periscope: kvm exit unknown\n");
             fprintf(stderr, "KVM: unknown exit, hardware reason %" PRIx64 "\n",
                     (uint64_t)run->hw.hardware_exit_reason);
             ret = -1;
@@ -2084,6 +2400,15 @@ int kvm_cpu_exec(CPUState *cpu)
             break;
         }
     } while (ret == 0);
+
+    if (periscope_shutdown_requested()) {
+        printf("periscope: shutdown request noticed. restoring VM...");
+
+        // TODO: error reporting?
+        periscope_restore_request();
+
+        vm_stop(RUN_STATE_RESTORE_VM);
+    }
 
     cpu_exec_end(cpu);
     qemu_mutex_lock_iothread();
@@ -2144,7 +2469,17 @@ int kvm_vcpu_ioctl(CPUState *cpu, int type, ...)
     va_end(ap);
 
     trace_kvm_vcpu_ioctl(cpu->cpu_index, type, arg);
+
+#ifdef PERISCOPE_TIMERS
+    peri_timer *pt = NULL;
+    if(type == KVM_RUN)
+       pt = start_interval("periscope_kvm_run.timer");
+#endif
     ret = ioctl(cpu->kvm_fd, type, arg);
+#ifdef PERISCOPE_TIMERS
+    if(pt)
+       stop_interval(pt);
+#endif
     if (ret == -1) {
         ret = -errno;
     }

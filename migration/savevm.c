@@ -59,7 +59,11 @@
 #include "migration/colo.h"
 #include "qemu/bitmap.h"
 #include "net/announce.h"
+#include "migration/periscope_perf_switches.h"
+#include "migration/periscope-delta-snap.h"
+#include "migration/periscope.h"
 
+extern bool dev_only_snapshot;
 const unsigned int postcopy_ram_discard_version = 0;
 
 /* Subcommands for QEMU_VM_COMMAND */
@@ -1093,6 +1097,7 @@ void qemu_savevm_state_setup(QEMUFile *f)
 
     trace_savevm_state_setup();
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops || !se->ops->save_setup) {
             continue;
         }
@@ -1124,6 +1129,7 @@ int qemu_savevm_state_resume_prepare(MigrationState *s)
     trace_savevm_state_resume_prepare();
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops || !se->ops->resume_prepare) {
             continue;
         }
@@ -1154,6 +1160,7 @@ int qemu_savevm_state_iterate(QEMUFile *f, bool postcopy)
 
     trace_savevm_state_iterate();
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops || !se->ops->save_live_iterate) {
             continue;
         }
@@ -1222,6 +1229,7 @@ void qemu_savevm_state_complete_postcopy(QEMUFile *f)
     int ret;
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops || !se->ops->save_live_complete_postcopy) {
             continue;
         }
@@ -1267,6 +1275,7 @@ int qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_only,
     cpu_synchronize_all_states();
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops ||
             (in_postcopy && se->ops->has_postcopy &&
              se->ops->has_postcopy(se->opaque)) ||
@@ -1301,6 +1310,7 @@ int qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_only,
     json_prop_int(vmdesc, "page_size", qemu_target_page_size());
     json_start_array(vmdesc, "devices");
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
 
         if ((!se->ops || !se->ops->save_state) && !se->vmsd) {
             continue;
@@ -1309,7 +1319,6 @@ int qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_only,
             trace_savevm_section_skip(se->idstr, se->section_id);
             continue;
         }
-
         trace_savevm_section_start(se->idstr, se->section_id);
 
         json_start_object(vmdesc, NULL);
@@ -1376,6 +1385,7 @@ void qemu_savevm_state_pending(QEMUFile *f, uint64_t threshold_size,
 
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (!se->ops || !se->ops->save_live_pending) {
             continue;
         }
@@ -1401,13 +1411,14 @@ void qemu_savevm_state_cleanup(void)
 
     trace_savevm_state_cleanup();
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if(dev_only_snapshot && se->is_ram) continue;
         if (se->ops && se->ops->save_cleanup) {
             se->ops->save_cleanup(se->opaque);
         }
     }
 }
 
-static int qemu_savevm_state(QEMUFile *f, Error **errp)
+int qemu_savevm_state(QEMUFile *f, Error **errp)
 {
     int ret;
     MigrationState *ms = migrate_get_current();
@@ -1420,9 +1431,9 @@ static int qemu_savevm_state(QEMUFile *f, Error **errp)
         return -EINVAL;
     }
 
-    if (migration_is_blocked(errp)) {
-        return -EINVAL;
-    }
+//    if (migration_is_blocked(errp)) {
+//        return -EINVAL;
+//    }
 
     if (migrate_use_block()) {
         error_setg(errp, "Block migration and snapshots are incompatible");
@@ -1445,6 +1456,79 @@ static int qemu_savevm_state(QEMUFile *f, Error **errp)
 
     ret = qemu_file_get_error(f);
     if (ret == 0) {
+        qemu_savevm_state_complete_precopy(f, false, false);
+        ret = qemu_file_get_error(f);
+    }
+    qemu_savevm_state_cleanup();
+    if (ret != 0) {
+        error_setg_errno(errp, -ret, "Error while writing VM state");
+    }
+
+    if (ret != 0) {
+        status = MIGRATION_STATUS_FAILED;
+    } else {
+        status = MIGRATION_STATUS_COMPLETED;
+    }
+    migrate_set_state(&ms->state, MIGRATION_STATUS_SETUP, status);
+
+    /* f is outer parameter, it should not stay in global migration state after
+     * this function finished */
+    ms->to_dst_file = NULL;
+
+    return ret;
+}
+
+int periscope_qemu_savevm_state(QEMUFile *f_iterable, QEMUFile *f_others, Error **errp)
+{
+    int ret;
+    MigrationState *ms = migrate_get_current();
+    MigrationStatus status;
+
+    if (migration_is_setup_or_active(ms->state) ||
+        ms->state == MIGRATION_STATUS_CANCELLING ||
+        ms->state == MIGRATION_STATUS_COLO) {
+        error_setg(errp, QERR_MIGRATION_ACTIVE);
+        return -EINVAL;
+    }
+
+//    if (migration_is_blocked(errp)) {
+//        return -EINVAL;
+//    }
+
+    if (migrate_use_block()) {
+        error_setg(errp, "Block migration and snapshots are incompatible");
+        return -EINVAL;
+    }
+
+    ret = 0;
+    migrate_init(ms);
+    QEMUFile *f = NULL;
+
+    if(f_iterable != NULL) {
+       f = f_iterable;
+       ms->to_dst_file = f;
+
+       qemu_mutex_unlock_iothread();
+       qemu_savevm_state_header(f);
+       qemu_savevm_state_setup(f);
+       qemu_mutex_lock_iothread();
+
+       while (qemu_file_get_error(f) == 0) {
+          if (qemu_savevm_state_iterate(f, false) > 0) {
+             break;
+          }
+       }
+
+       ret = qemu_file_get_error(f);
+    }
+    if (ret == 0) {
+        f = f_others;
+        ms->to_dst_file = f;
+
+        qemu_mutex_unlock_iothread();
+        qemu_savevm_state_header(f);
+        qemu_mutex_lock_iothread();
+
         qemu_savevm_state_complete_precopy(f, false, false);
         ret = qemu_file_get_error(f);
     }
@@ -2415,14 +2499,20 @@ out:
 int qemu_loadvm_state(QEMUFile *f)
 {
     MigrationIncomingState *mis = migration_incoming_get_current();
-    Error *local_err = NULL;
+//    Error *local_err = NULL;
     unsigned int v;
     int ret;
 
-    if (qemu_savevm_state_blocked(&local_err)) {
-        error_report_err(local_err);
-        return -EINVAL;
-    }
+//#ifdef PERI_ENABLE_RESTORE_OPTS_RESET_RAM
+//    if(!quick_reset_ram) {
+//       ret = ram_duplicate_mappings();
+//    }
+//#endif
+
+//    if (qemu_savevm_state_blocked(&local_err)) {
+//        error_report_err(local_err);
+//        return -EINVAL;
+//    }
 
     v = qemu_get_be32(f);
     if (v != QEMU_VM_FILE_MAGIC) {
@@ -2440,7 +2530,7 @@ int qemu_loadvm_state(QEMUFile *f)
         return -ENOTSUP;
     }
 
-    if (qemu_loadvm_state_setup(f) != 0) {
+    if (!periscope_no_loadvm_state_setup && qemu_loadvm_state_setup(f) != 0) {
         return -EINVAL;
     }
 
@@ -2509,11 +2599,22 @@ int qemu_loadvm_state(QEMUFile *f)
         }
     }
 
+    if (!periscope_no_loadvm_state_cleanup)
     qemu_loadvm_state_cleanup();
+
     cpu_synchronize_all_post_init();
+#ifdef PERI_ENABLE_RESTORE_OPTS_RESET_RAM
+    if(!quick_reset_ram) {
+       ret = ram_duplicate_mappings_cow();
+    } else {
+       ret = ram_reset_mappings_cow();
+    }
+#endif
+
 
     return ret;
 }
+
 
 int qemu_load_device_state(QEMUFile *f)
 {
@@ -2543,9 +2644,9 @@ int save_snapshot(const char *name, Error **errp)
     struct tm tm;
     AioContext *aio_context;
 
-    if (migration_is_blocked(errp)) {
-        return false;
-    }
+//    if (migration_is_blocked(errp)) {
+//        return false;
+//    }
 
     if (!replay_can_snapshot()) {
         error_setg(errp, "Record/replay does not allow making snapshot "
@@ -2576,7 +2677,7 @@ int save_snapshot(const char *name, Error **errp)
     }
     aio_context = bdrv_get_aio_context(bs);
 
-    saved_vm_running = runstate_is_running();
+    saved_vm_running = false;
 
     ret = global_state_store();
     if (ret) {
@@ -2736,6 +2837,94 @@ void qmp_xen_load_devices_state(const char *filename, Error **errp)
 }
 
 int load_snapshot(const char *name, Error **errp)
+{
+    BlockDriverState *bs, *bs_vm_state;
+    QEMUSnapshotInfo sn;
+    QEMUFile *f;
+    int ret;
+    AioContext *aio_context;
+    MigrationIncomingState *mis = migration_incoming_get_current();
+
+    if (!replay_can_snapshot()) {
+        error_setg(errp, "Record/replay does not allow loading snapshot "
+                   "right now. Try once more later.");
+        return -EINVAL;
+    }
+
+    if (!bdrv_all_can_snapshot(&bs)) {
+        error_setg(errp,
+                   "Device '%s' is writable but does not support snapshots",
+                   bdrv_get_device_name(bs));
+        return -ENOTSUP;
+    }
+    ret = bdrv_all_find_snapshot(name, &bs);
+    if (ret < 0) {
+        error_setg(errp,
+                   "Device '%s' does not have the requested snapshot '%s'",
+                   bdrv_get_device_name(bs), name);
+        return ret;
+    }
+
+    bs_vm_state = bdrv_all_find_vmstate_bs();
+    if (!bs_vm_state) {
+        error_setg(errp, "No block device supports snapshots");
+        return -ENOTSUP;
+    }
+    aio_context = bdrv_get_aio_context(bs_vm_state);
+
+    /* Don't even try to load empty VM states */
+    aio_context_acquire(aio_context);
+    ret = bdrv_snapshot_find(bs_vm_state, &sn, name);
+    aio_context_release(aio_context);
+    if (ret < 0) {
+        return ret;
+    } else if (sn.vm_state_size == 0) {
+        error_setg(errp, "This is a disk-only snapshot. Revert to it "
+                   " offline using qemu-img");
+        return -EINVAL;
+    }
+
+    /* Flush all IO requests so they don't interfere with the new state.  */
+    bdrv_drain_all_begin();
+
+    ret = bdrv_all_goto_snapshot(name, &bs, errp);
+    if (ret < 0) {
+        error_prepend(errp, "Could not load snapshot '%s' on '%s': ",
+                      name, bdrv_get_device_name(bs));
+        goto err_drain;
+    }
+
+    /* restore the VM state */
+    f = qemu_fopen_bdrv(bs_vm_state, 0);
+    if (!f) {
+        error_setg(errp, "Could not open VM state file");
+        ret = -EINVAL;
+        goto err_drain;
+    }
+
+    qemu_system_reset(SHUTDOWN_CAUSE_NONE);
+    mis->from_src_file = f;
+
+    aio_context_acquire(aio_context);
+    ret = qemu_loadvm_state(f);
+    migration_incoming_state_destroy();
+    aio_context_release(aio_context);
+
+    bdrv_drain_all_end();
+
+    if (ret < 0) {
+        error_setg(errp, "Error %d while loading VM state", ret);
+        return ret;
+    }
+
+    return 0;
+
+err_drain:
+    bdrv_drain_all_end();
+    return ret;
+}
+
+int load_snapshot_via_rollback(const char *name, Error **errp)
 {
     BlockDriverState *bs, *bs_vm_state;
     QEMUSnapshotInfo sn;

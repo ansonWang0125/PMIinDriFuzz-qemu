@@ -1717,6 +1717,24 @@ static void kvm_getput_reg(__u64 *kvm_reg, target_ulong *qemu_reg, int set)
     }
 }
 
+target_ulong kvm_arch_get_kvm_rip(CPUState *cs)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    //CPUX86State *env = &cpu->env;
+    struct kvm_regs regs;
+    int ret;
+
+    ret = kvm_vcpu_ioctl(CPU(cpu), KVM_GET_REGS, &regs);
+    if(ret < 0) {
+       printf("Error KVM_GET_REGS %d\n", ret);
+       return 0;
+    }
+    // FIXME: make sure kvm_getput_regs is called before
+    //return env->eip;
+    return regs.rip;
+}
+
+
 static int kvm_getput_regs(X86CPU *cpu, int set)
 {
     CPUX86State *env = &cpu->env;

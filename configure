@@ -434,6 +434,7 @@ cpuid_h="no"
 avx2_opt=""
 zlib="yes"
 capstone=""
+agamotto=""
 lzo=""
 snappy=""
 bzip2=""
@@ -1504,6 +1505,8 @@ for opt do
   ;;
   --enable-capstone=system) capstone="system"
   ;;
+  --with-agamotto=*) agamotto="$optarg"
+  ;;
   --with-git=*) git="$optarg"
   ;;
   --enable-git-update) git_update=yes
@@ -1816,6 +1819,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   sheepdog        sheepdog block driver support
   crypto-afalg    Linux AF_ALG crypto backend driver
   capstone        capstone disassembler support
+  agamotto        agamotto checkpoint support
   debug-mutex     mutex debugging support
   libpmem         libpmem support
 
@@ -4988,6 +4992,14 @@ EOF
 fi
 
 ##########################################
+# agamotto
+
+if test -e "$agamotto"; then
+  QEMU_CFLAGS="$QEMU_CFLAGS -I$agamotto"
+  LIBS="-L$agamotto -lagamotto_nomain $LIBS"
+fi
+
+##########################################
 # capstone
 
 case "$capstone" in
@@ -7199,6 +7211,9 @@ if test "$ivshmem" = "yes" ; then
 fi
 if test "$capstone" != "no" ; then
   echo "CONFIG_CAPSTONE=y" >> $config_host_mak
+fi
+if test -e "$agamotto"; then
+  echo "CONFIG_PERISCOPE=y" >> $config_host_mak
 fi
 if test "$debug_mutex" = "yes" ; then
   echo "CONFIG_DEBUG_MUTEX=y" >> $config_host_mak

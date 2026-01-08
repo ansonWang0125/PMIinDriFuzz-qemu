@@ -109,6 +109,8 @@ typedef struct IVShmemState {
     uint64_t msg_buf;           /* buffer for receiving server messages */
     int msg_buffered_bytes;     /* #bytes in @msg_buf */
 
+    OnOffAuto chkpt;
+
     /* migration stuff */
     OnOffAuto master;
     Error *migration_blocker;
@@ -939,7 +941,11 @@ static void ivshmem_common_realize(PCIDevice *dev, Error **errp)
         }
     }
 
-    vmstate_register_ram(s->ivshmem_bar2, DEVICE(s));
+
+    if (s->chkpt == ON_OFF_AUTO_ON) {
+        vmstate_register_ram(s->ivshmem_bar2, DEVICE(s));
+    }
+
     pci_register_bar(PCI_DEVICE(s), 2,
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_PREFETCH |
@@ -971,7 +977,9 @@ static void ivshmem_exit(PCIDevice *dev)
             close(fd);
         }
 
-        vmstate_unregister_ram(s->ivshmem_bar2, DEVICE(dev));
+        if (s->chkpt == ON_OFF_AUTO_ON) {
+            vmstate_unregister_ram(s->ivshmem_bar2, DEVICE(dev));
+        }
     }
 
     if (s->hostmem) {
@@ -1059,6 +1067,7 @@ static const VMStateDescription ivshmem_plain_vmsd = {
 
 static Property ivshmem_plain_properties[] = {
     DEFINE_PROP_ON_OFF_AUTO("master", IVShmemState, master, ON_OFF_AUTO_OFF),
+    DEFINE_PROP_ON_OFF_AUTO("chkpt", IVShmemState, chkpt, ON_OFF_AUTO_OFF),
     DEFINE_PROP_LINK("memdev", IVShmemState, hostmem, TYPE_MEMORY_BACKEND,
                      HostMemoryBackend *),
     DEFINE_PROP_END_OF_LIST(),

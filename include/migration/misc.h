@@ -42,6 +42,9 @@ void precopy_enable_free_page_optimization(void);
 
 void ram_mig_init(void);
 void qemu_guest_free_page_hint(void *addr, size_t len);
+int ram_duplicate_mappings_cow(void);
+int ram_duplicate_mappings(void);
+int ram_reset_mappings_cow(void);
 
 /* migration/block.c */
 

@@ -504,6 +504,31 @@ size_t qemu_get_buffer(QEMUFile *f, uint8_t *buf, size_t size)
     }
     return done;
 }
+size_t skip_qemu_get_buffer(QEMUFile *f, uint8_t *buf, size_t size)
+{
+    //size_t pending = size;
+    //size_t done = 0;
+    //size_t res;
+    uint8_t *src;
+
+    qemu_peek_buffer(f, &src, size, 0);
+    qemu_file_skip(f, size);
+    return size;
+    //while (pending > 0) {
+
+    //    res = qemu_peek_buffer(f, &src, MIN(pending, IO_BUF_SIZE), 0);
+    //    if (res == 0) {
+    //        return done;
+    //    }
+    //    //memcpy(buf, src, res);
+    //    qemu_file_skip(f, res);
+    //    buf += res;
+    //    pending -= res;
+    //    done += res;
+    //}
+    //return done;
+}
+
 
 /*
  * Read 'size' bytes of data from the file.

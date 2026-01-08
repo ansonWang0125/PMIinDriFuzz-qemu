@@ -1440,6 +1440,12 @@ struct kvm_enc_region {
 /* Available with KVM_CAP_HYPERV_CPUID */
 #define KVM_GET_SUPPORTED_HV_CPUID _IOWR(KVMIO, 0xc1, struct kvm_cpuid2)
 
+#define KVM_ENABLE_DMA_TRACE      _IO(KVMIO,   0xc2)
+#define KVM_DISABLE_DMA_TRACE     _IO(KVMIO,   0xc3)
+#define KVM_UPDATE_USER_MEMORY_REGION _IOW(KVMIO, 0xc4, \
+            struct kvm_userspace_memory_region)
+
+
 /* Secure Encrypted Virtualization command */
 enum sev_cmd_id {
 	/* Guest initialization commands */

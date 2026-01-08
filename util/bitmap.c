@@ -287,6 +287,18 @@ bool bitmap_test_and_clear_atomic(unsigned long *map, long start, long nr)
     return dirty != 0;
 }
 
+void bitmap_copy_atomic(unsigned long *dst, unsigned long *src,
+                                  long nr)
+{
+    while (nr > 0) {
+        *dst = atomic_read(src);
+        dst++;
+        src++;
+        nr -= BITS_PER_LONG;
+    }
+}
+
+
 void bitmap_copy_and_clear_atomic(unsigned long *dst, unsigned long *src,
                                   long nr)
 {

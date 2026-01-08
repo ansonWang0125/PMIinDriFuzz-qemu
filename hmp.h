@@ -66,9 +66,12 @@ void hmp_snapshot_delete_blkdev_internal(Monitor *mon, const QDict *qdict);
 void hmp_drive_mirror(Monitor *mon, const QDict *qdict);
 void hmp_drive_backup(Monitor *mon, const QDict *qdict);
 void hmp_loadvm(Monitor *mon, const QDict *qdict);
+void hmp_loadvm_minimal(Monitor *mon, const QDict *qdict);
 void hmp_savevm(Monitor *mon, const QDict *qdict);
+void hmp_savevm_minimal(Monitor *mon, const QDict *qdict);
 void hmp_delvm(Monitor *mon, const QDict *qdict);
 void hmp_info_snapshots(Monitor *mon, const QDict *qdict);
+void hmp_info_snapshots_minimal(Monitor *mon, const QDict *qdict);
 void hmp_migrate_cancel(Monitor *mon, const QDict *qdict);
 void hmp_migrate_continue(Monitor *mon, const QDict *qdict);
 void hmp_migrate_incoming(Monitor *mon, const QDict *qdict);
@@ -140,6 +143,7 @@ void migrate_set_parameter_completion(ReadLineState *rs, int nb_args,
                                       const char *str);
 void delvm_completion(ReadLineState *rs, int nb_args, const char *str);
 void loadvm_completion(ReadLineState *rs, int nb_args, const char *str);
+void loadvm_minimal_completion(ReadLineState *rs, int nb_args, const char *str);
 void hmp_rocker(Monitor *mon, const QDict *qdict);
 void hmp_rocker_ports(Monitor *mon, const QDict *qdict);
 void hmp_rocker_of_dpa_flows(Monitor *mon, const QDict *qdict);
@@ -151,4 +155,7 @@ void hmp_info_vm_generation_id(Monitor *mon, const QDict *qdict);
 void hmp_info_memory_size_summary(Monitor *mon, const QDict *qdict);
 void hmp_info_sev(Monitor *mon, const QDict *qdict);
 
+void hmp_kcov_ioctl(Monitor *mon, const QDict *qdict);
+void hmp_kcov_get_area_offset(Monitor *mon, const QDict *qdict);
+void hmp_kcov_print_coverage(Monitor *mon, const QDict *qdict);
 #endif
