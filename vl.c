@@ -3043,37 +3043,38 @@ static int check_sig_exist(uint64_t* prev_sigs, uint64_t sig){
     return 0;
 }
 
-static void write_sample(struct perf_sample* sample_p, struct sig_list* sigs){
+static int write_sample(struct perf_sample* sample_p, struct sig_list* sigs, int prev_fd){
     char path_buf[PATH_BUF_LEN], log_buf[LOG_BUF_LEN];
-    int perf_fd = 0, perf_fd_flag;
+    int perf_fd = prev_fd, perf_fd_flag;
     memset(path_buf, 0, PATH_BUF_LEN);
     memset(log_buf, 0, LOG_BUF_LEN);
     uint64_t sig = sample_p->sample_header.sig;
     if (sigs->prev_sigs[sigs->cur] != sig) {
         sprintf(path_buf, "/storage/PMIinDriFuzz/scripts/c/shared_fs/out/perf/%lx.txt", sig);
-        if (!check_sig_exist(sigs->prev_sigs, sig))
+        if (!check_sig_exist(sigs->prev_sigs, sig)) {
             perf_fd_flag = O_CREAT | O_TRUNC | O_RDWR;
-        else
+        } else {
             perf_fd_flag = O_APPEND | O_RDWR;
+        }
         perf_fd = open(path_buf, perf_fd_flag, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
         sigs->prev_sigs[++sigs->cur] = sig;
-    } else if (perf_fd == 0) {
-        return;
+    } else if (prev_fd == 0) {
+        return 0;
     }
     // Write the sample to perf log file.
-    struct perf_sample_header header = sample_p->sample_header;
-    sprintf(log_buf, "sys_nr: %d, arg0: %d, arg1: %d, arg2: %d, arg3: %d, arg4: %d, arg5: %d\n", header.sys_nr, header.args_buffer[0], header.args_buffer[1], header.args_buffer[2], header.args_buffer[3], header.args_buffer[4], header.args_buffer[5]);
-    write(perf_fd, log_buf, LOG_BUF_LEN);
-    for (int i = 0; i < sample_p->bnr; ++i){
-        sprintf(log_buf, "%dth entry, from: %llx, to: %llx\n", i, sample_p->lbrs[i].from, sample_p->lbrs[i].to);
-        write(perf_fd, log_buf, sizeof(uint64_t));
-    }
-    return;
+    // struct perf_sample_header header = sample_p->sample_header;
+    // sprintf(log_buf, "sys_nr: %d, arg0: %d, arg1: %d, arg2: %d, arg3: %d, arg4: %d, arg5: %d\n", header.sys_nr, header.args_buffer[0], header.args_buffer[1], header.args_buffer[2], header.args_buffer[3], header.args_buffer[4], header.args_buffer[5]);
+    // write(perf_fd, log_buf, strlen(log_buf));
+    // for (int i = 0; i < sample_p->bnr; ++i){
+    //     sprintf(log_buf, "%dth entry, from: %llx, to: %llx\n", i, sample_p->lbrs[i].from, sample_p->lbrs[i].to);
+    //     write(perf_fd, log_buf, strlen(log_buf));
+    // }
+    return perf_fd;
 }
 
 static void *read_shmem_workload_thread(void *opaque) {
     void* shared_memory = NULL;
-    int lbr_num = 0;
+    int lbr_num = 0, perf_fd = 0;
     struct sig_list* sigs = malloc(sizeof(struct sig_list));
     memset(sigs->prev_sigs, 0, sizeof(sigs->prev_sigs));
     sigs->cur = 0;
@@ -3084,15 +3085,16 @@ static void *read_shmem_workload_thread(void *opaque) {
     }
     shared_memory = mmap(0, PERF_MEM_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (shared_memory == MAP_FAILED) {
-        printf("mmap pci failed!!\n");
+        printf("mmap failed!!\n");
         exit(0);
     }
     struct shared_memory_page* meta_data_page = (struct shared_memory_page*)shared_memory;
     // TODO_L4: Using polling instead busy waiting.
+    meta_data_page->data_tail = meta_data_page->data_offset;
     while (true) {
         if (meta_data_page->data_tail < meta_data_page->data_head){
             struct perf_sample* sample_p = read_shared_mem(shared_memory, meta_data_page);
-            write_sample(sample_p, sigs);
+            perf_fd = write_sample(sample_p, sigs, perf_fd);
             lbr_num++;
         }
     }
