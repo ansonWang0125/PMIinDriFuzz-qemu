@@ -30,6 +30,8 @@
 #include "qemu/help_option.h"
 #include "qemu/uuid.h"
 #include "sysemu/seccomp.h"
+#include <linux/perf_event.h> 
+#include <stdlib.h>
 
 #ifdef CONFIG_SDL
 #if defined(__APPLE__) || defined(main)
@@ -2986,6 +2988,127 @@ static void user_register_global_props(void)
                       global_init_func, NULL, NULL);
 }
 
+// The structures in agent.h
+#define LBR_BRANCH_NR 32
+#define PERF_MEM_SIZE 1024*1024
+#define ARGS_NUM 6
+#define PATH_BUF_LEN 100
+#define LOG_BUF_LEN 200
+#define SIG_MAX 100 // Assume program number not exceed 100 for now.
+
+// TODO_L4: Find a way to export agent.h to full system, so we can call it without path
+struct shared_memory_page {
+    uint64_t data_head;
+    uint64_t data_tail;
+    uint64_t data_offset;
+} ;
+
+struct perf_sample_header {
+    int sys_nr;
+    char args_buffer[ARGS_NUM];
+    uint64_t sig;
+};
+
+struct perf_sample {
+    struct perf_sample_header sample_header;
+    uint64_t    bnr;
+    struct perf_branch_entry lbrs[LBR_BRANCH_NR];
+};
+
+// TODO_L4: Find a way to write the below code to seperate file, this code broke the qemu structure.
+
+struct sig_list {
+    uint64_t prev_sigs[SIG_MAX];
+    uint64_t cur;
+};
+
+//　TODO_L3: Consider data_head
+static struct perf_sample* read_shared_mem(void* shared_memory, struct shared_memory_page* meta_data_page){
+    struct perf_sample* sample_p = (struct perf_sample*)((int64_t)shared_memory + meta_data_page->data_tail);
+    printf("branch number: %ld, 0th from: %llx, 0th to: %llx\n", sample_p->bnr, sample_p->lbrs[0].from, sample_p->lbrs[0].to);
+    meta_data_page->data_tail += sizeof(struct perf_sample);
+    if (meta_data_page->data_tail > PERF_MEM_SIZE)
+        meta_data_page->data_tail = meta_data_page->data_offset;
+    return sample_p;
+}
+
+static int check_sig_exist(uint64_t* prev_sigs, uint64_t sig){
+    for (int i = 0; i < SIG_MAX; i++){
+        if (prev_sigs[i] == sig) {
+            return 1;
+        } else if (prev_sigs[i] == 0) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static void write_sample(struct perf_sample* sample_p, struct sig_list* sigs){
+    char path_buf[PATH_BUF_LEN], log_buf[LOG_BUF_LEN];
+    int perf_fd = 0, perf_fd_flag;
+    memset(path_buf, 0, PATH_BUF_LEN);
+    memset(log_buf, 0, LOG_BUF_LEN);
+    uint64_t sig = sample_p->sample_header.sig;
+    if (sigs->prev_sigs[sigs->cur] != sig) {
+        sprintf(path_buf, "/storage/PMIinDriFuzz/scripts/c/shared_fs/out/perf/%lx.txt", sig);
+        if (!check_sig_exist(sigs->prev_sigs, sig))
+            perf_fd_flag = O_CREAT | O_TRUNC | O_RDWR;
+        else
+            perf_fd_flag = O_APPEND | O_RDWR;
+        perf_fd = open(path_buf, perf_fd_flag, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        sigs->prev_sigs[++sigs->cur] = sig;
+    } else if (perf_fd == 0) {
+        return;
+    }
+    // Write the sample to perf log file.
+    struct perf_sample_header header = sample_p->sample_header;
+    sprintf(log_buf, "sys_nr: %d, arg0: %d, arg1: %d, arg2: %d, arg3: %d, arg4: %d, arg5: %d\n", header.sys_nr, header.args_buffer[0], header.args_buffer[1], header.args_buffer[2], header.args_buffer[3], header.args_buffer[4], header.args_buffer[5]);
+    write(perf_fd, log_buf, LOG_BUF_LEN);
+    for (int i = 0; i < sample_p->bnr; ++i){
+        sprintf(log_buf, "%dth entry, from: %llx, to: %llx\n", i, sample_p->lbrs[i].from, sample_p->lbrs[i].to);
+        write(perf_fd, log_buf, sizeof(uint64_t));
+    }
+    return;
+}
+
+static void *read_shmem_workload_thread(void *opaque) {
+    void* shared_memory = NULL;
+    int lbr_num = 0;
+    struct sig_list* sigs = malloc(sizeof(struct sig_list));
+    memset(sigs->prev_sigs, 0, sizeof(sigs->prev_sigs));
+    sigs->cur = 0;
+    int shm_fd = shm_open("/perf_record", O_RDWR, S_IRUSR | S_IRGRP | S_IROTH);
+    if (!shm_fd) {
+        perror("fopen");
+        return NULL;
+    }
+    shared_memory = mmap(0, PERF_MEM_SIZE, PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_memory == MAP_FAILED) {
+        printf("mmap pci failed!!\n");
+        exit(0);
+    }
+    struct shared_memory_page* meta_data_page = (struct shared_memory_page*)shared_memory;
+    // TODO_L4: Using polling instead busy waiting.
+    while (true) {
+        if (meta_data_page->data_tail < meta_data_page->data_head){
+            struct perf_sample* sample_p = read_shared_mem(shared_memory, meta_data_page);
+            write_sample(sample_p, sigs);
+            lbr_num++;
+        }
+    }
+    free(sigs);
+    close(shm_fd);
+    return NULL;
+}
+
+static void read_shmem_workload_init(void)
+{
+    static QemuThread read_shmem;
+    qemu_thread_create(&read_shmem, "read_shmem",
+                       read_shmem_workload_thread, NULL,
+                       QEMU_THREAD_DETACHED);
+}
+
 int main(int argc, char **argv, char **envp)
 {
     int i;
@@ -4600,6 +4723,8 @@ int main(int argc, char **argv, char **envp)
 
     accel_setup_post(current_machine);
     os_setup_post();
+
+    read_shmem_workload_init();
 
     main_loop();
 
